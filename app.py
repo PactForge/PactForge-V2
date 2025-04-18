@@ -1,226 +1,148 @@
 import os
 import time
 import chromadb
-import numpy as np
-import pandas as pd
 from docx import Document
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from google.api_core import retry
 import google.generativeai as genai
-from google.generativeai import types
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
-# Initialize FastAPI app
+# Initialize FastAPI
 app = FastAPI()
-
-# Enable CORS to allow frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production to specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize Gemini client with embedded API key
-GOOGLE_API_KEY = "AIzaSyAQeDHegBbQZ_0-oGS_KxvBPrGvU9Nfcns"
+# Configuration
+GOOGLE_API_KEY = "AIzaSyAQeDHegBbQZ_0-oGS_KxvBPrGvU9Nfcns"  # Consider using environment variables
 genai.configure(api_key=GOOGLE_API_KEY)
-# Use GenerativeModel instead of GenerativeAI
-model = genai.GenerativeModel('gemini-2.0-flash')  # Specify the model name
+model = genai.GenerativeModel('gemini-2.0-flash')
+model_config = genai.types.GenerationConfig(temperature=0.75, top_p=0.9)
 
-# Gemini model configuration
-model_config = types.GenerationConfig(
-    temperature=0.75,
-    top_p=0.9,
-)
+# File Path Setup
+BASE_DIR = Path(__file__).parent
+CLAUSES_DIR = BASE_DIR / "Clauses"
+SAMPLES_DIR = BASE_DIR / "sampleagreements"
 
-# ChromaDB client
-clientdb = chromadb.PersistentClient(path="./chromadb_data")
-rent = clientdb.get_or_create_collection(name="rent_agreements")
-nda = clientdb.get_or_create_collection(name="nda_agreements")
-employment = clientdb.get_or_create_collection(name="employ_agreements")
-franchise = clientdb.get_or_create_collection(name="franch_agreements")
-contractor = clientdb.get_or_create_collection(name="contract_agreements")
-all_dbs = [rent, nda, employment, franchise, contractor]
+# ChromaDB Setup
+clientdb = chromadb.PersistentClient(path=str(BASE_DIR / "chromadb_data"))
+dbs = {
+    "rent": clientdb.get_or_create_collection(name="rent_agreements"),
+    "nda": clientdb.get_or_create_collection(name="nda_agreements"),
+    "employment": clientdb.get_or_create_collection(name="employ_agreements"),
+    "franchise": clientdb.get_or_create_collection(name="franch_agreements"),
+    "contractor": clientdb.get_or_create_collection(name="contract_agreements")
+}
 
-# Global variables
-req = False
-final_type = ""
-important_info = ""
-extra_info = ""
-obtained_info = ""
-
-# Input model for API
 class AgreementRequest(BaseModel):
     agreement_type: str
     important_info: str
     extra_info: str
 
-# Retry mechanism for API errors
-def is_retriable(e):
-    return isinstance(e, genai.APIError) and e.code in {429, 503}
+# Helper Functions
+def read_docx(file_path):
+    try:
+        return [p.text for p in Document(file_path).paragraphs if p.text.strip()]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading {file_path}: {str(e)}")
 
-# Read DOCX file
-def read_docx(endname):
-    path = f"./Clauses/{endname}.docx"
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File {path} not found")
-    doc = Document(path)
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return paragraphs
+def get_sample_paths(agreement_type):
+    type_dir = SAMPLES_DIR / agreement_type / agreement_type
+    if not type_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Sample directory not found: {type_dir}")
+    return [str(f) for f in type_dir.glob("*.docx")]
 
-# Extract full DOCX document
-def extract_docx(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File {path} not found")
-    doc = Document(path)
-    return doc
+@retry.Retry(predicate=lambda e: isinstance(e, genai.APIError) and e.code in {429, 503})
+def generate_embeddings(content, is_doc=True):
+    try:
+        embed = genai.embed_content(
+            model='models/text-embedding-004',
+            content=content,
+            task_type="retrieval_document" if is_doc else "retrieval_query"
+        )
+        return [e.values for e in embed.embeddings][0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding generation failed: {str(e)}")
 
-# List sample agreement paths
-def extract_samples(endname):
-    dataset_path = f"./sampleagreements/{endname}/{endname}"
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"Directory {dataset_path} not found")
-    docx_files = []
-    for item in os.listdir(dataset_path):
-        item_path = os.path.join(dataset_path, item)
-        if os.path.isfile(item_path) and item.lower().endswith('.docx'):
-            docx_files.append(item_path)
-    return docx_files
+def initialize_db():
+    for agreement_type, db in dbs.items():
+        clause_file = CLAUSES_DIR / f"{agreement_type}.docx"
+        if not clause_file.exists():
+            raise HTTPException(status_code=404, detail=f"Clause file not found: {clause_file}")
+        
+        clauses = read_docx(clause_file)
+        try:
+            db.add(
+                embeddings=[generate_embeddings(c) for c in clauses],
+                ids=[f"{agreement_type}-{i}" for i in range(len(clauses))],
+                documents=clauses
+            )
+            time.sleep(0.4)  # Rate limiting
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"DB initialization failed: {str(e)}")
 
-# Generate text embeddings with retry
-@retry.Retry(predicate=is_retriable)
-def generate_embeddings(cl, etype):
-    embedding_task = "retrieval_document" if etype else "retrieval_query"
-    embed = genai.embed_content(
-        model='models/text-embedding-004',
-        content=cl,
-        task_type=embedding_task
-    )
-    return [e.values for e in embed.embeddings]
+# Initialize database on startup
+initialize_db()
 
-# Initialize ChromaDB with clauses
-def initialize_chromadb():
-    agreement_types = ["rent", "nda", "employment", "franchise", "contractor"]
-    all_clauses = [read_docx(atype) for atype in agreement_types]
-    for j, dataset in enumerate(all_clauses):
-        embeds, ids, documents = [], [], []
-        for i, clause in enumerate(dataset):
-            vector = generate_embeddings(clause, True)
-            time.sleep(0.4)  # Avoid API rate limits
-            embeds.append(vector[0])
-            ids.append(f"clause-{j}-{i}")
-            documents.append(clause)
-        all_dbs[j].add(embeddings=embeds, ids=ids, documents=documents)
-
-# Standardize agreement type
-def strip_type(agr: str):
-    agreement_types = ["rent", "nda", "contractor", "employment", "franchise"]
-    prompt = f"""Return the type of agreement in one lowercase word from {agreement_types}. Input: {agr}"""
-    response = model.generate_content(
-        prompt,
-        generation_config=model_config
-    )
-    return response.text.strip()
-
-# Sentiment analysis for response
-def pos_neg(response: str):
-    prompt = f"""Classify sentiment. Reply '1' for positive, '0' for negative. Sentence: {response}"""
-    response_heat = model.generate_content(
-        prompt,
-        generation_config=model_config
-    )
-    return bool(int(response_heat.text))
-
-# Analyze input sufficiency
-def perform_analysis(atype, impt):
-    prompt = f"""As a legal assistant, evaluate if the input '{impt}' is sufficient for a '{atype}' agreement.
-    Respond with:
-    - "Yes. All essential information seems to be present."
-    - "No, The following essential information seems to be missing or unclear: [list]"
-    - "No, The provided information is too vague or insufficient."
-    """
-    response = model.generate_content(
-        prompt,
-        generation_config=model_config
-    )
-    return response.text
-
-# Identify missing information
-def obtain_information_holes(important_info, extra_info, final_type):
-    total_info = important_info + " " + extra_info
-    prompt = f"""Identify missing or unclear information for a {final_type} agreement based on: {total_info}."""
-    response = model.generate_content(
-        prompt,
-        generation_config=model_config
-    )
-    return response.text
-
-# Simulate data retrieval
-def get_data(holes: str, final_type: str):
-    prompt = f"""Simulate retrieving information for {holes} to generate a {final_type} agreement."""
-    response = model.generate_content(
-        prompt,
-        generation_config=model_config
-    )
-    return response.text
-
-# Initialize ChromaDB on startup
-initialize_chromadb()
-
-# API endpoint to generate agreement
+# API Endpoint
 @app.post("/generate-agreement")
 async def generate_agreement(request: AgreementRequest):
-    global req, final_type, important_info, extra_info, obtained_info
     try:
-        # Set global variables
-        final_type = strip_type(request.agreement_type)
-        important_info = request.important_info
-        extra_info = request.extra_info
-        req = False
+        # Standardize agreement type
+        agreement_type = model.generate_content(
+            f"Return agreement type (rent/nda/contractor/employment/franchise). Input: {request.agreement_type}",
+            generation_config=model_config
+        ).text.strip().lower()
 
         # Validate input sufficiency
-        analysis_result = perform_analysis(final_type, important_info)
-        if not pos_neg(analysis_result):
-            return {"response": "Please provide more information.", "error": analysis_result}
-
-        # Identify and fill information gaps
-        info_holes = obtain_information_holes(important_info, extra_info, final_type)
-        obtained_info = get_data(info_holes, final_type)
+        analysis = model.generate_content(
+            f"Evaluate if '{request.important_info}' is sufficient for '{agreement_type}' agreement. "
+            "Respond 'Yes. All essential information seems to be present.' or list missing info.",
+            generation_config=model_config
+        ).text
+        
+        if "Yes" not in analysis:
+            return {"response": "Please provide more information.", "error": analysis}
 
         # Retrieve relevant clauses
-        dbname = final_type + "_agreements"
-        querydb = clientdb.get_collection(name=dbname)
-        query_embed = generate_embeddings(extra_info, False)
-        results = querydb.query(query_embeddings=query_embed, n_results=40)
-        relevant_documents = results['documents'][0] if results['documents'] else []
-
-        # Get sample agreements
-        sample_agreements = extract_samples(final_type)
-
-        # Construct final prompt
-        prompt = f"""You are a helpful AI assistant for law agreement generation.
-        User info: {important_info}
-        Agreement type: {final_type}
-        Relevant clauses: {relevant_documents}
-        User instructions: {extra_info}
-        Sample agreement paths: {sample_agreements}
-        Additional info: {obtained_info}
-        Generate a concise, legally sound {final_type} agreement.
-        """
+        db = dbs.get(agreement_type)
+        if not db:
+            raise HTTPException(status_code=400, detail="Invalid agreement type")
+            
+        results = db.query(
+            query_embeddings=[generate_embeddings(request.extra_info, False)],
+            n_results=40
+        )
+        relevant_clauses = results['documents'][0] if results['documents'] else []
 
         # Generate agreement
-        response = model.generate_content(
-            prompt,
+        agreement = model.generate_content(
+            f"""Generate {agreement_type} agreement with:
+            - Key info: {request.important_info}
+            - Extra details: {request.extra_info}
+            - Relevant clauses: {relevant_clauses}
+            - Samples: {get_sample_paths(agreement_type)}
+            """,
             generation_config=model_config
-        )
+        ).text
 
-        return {"response": response.text, "error": None}
+        return {"response": agreement, "error": None}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Agreement generation failed: {str(e)}")
 
 # Serve frontend
-from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
