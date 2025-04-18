@@ -26,7 +26,8 @@ app.add_middleware(
 # Initialize Gemini client with embedded API key
 GOOGLE_API_KEY = "AIzaSyAQeDHegBbQZ_0-oGS_KxvBPrGvU9Nfcns"
 genai.configure(api_key=GOOGLE_API_KEY)
-client = genai.GenerativeAI()
+# Use GenerativeModel instead of GenerativeAI
+model = genai.GenerativeModel('gemini-2.0-flash')  # Specify the model name
 
 # Gemini model configuration
 model_config = types.GenerationConfig(
@@ -92,8 +93,8 @@ def extract_samples(endname):
 @retry.Retry(predicate=is_retriable)
 def generate_embeddings(cl, etype):
     embedding_task = "retrieval_document" if etype else "retrieval_query"
-    embed = client.embed_content(
-        model="models/text-embedding-004",
+    embed = genai.embed_content(
+        model='models/text-embedding-004',
         content=cl,
         task_type=embedding_task
     )
@@ -117,9 +118,8 @@ def initialize_chromadb():
 def strip_type(agr: str):
     agreement_types = ["rent", "nda", "contractor", "employment", "franchise"]
     prompt = f"""Return the type of agreement in one lowercase word from {agreement_types}. Input: {agr}"""
-    response = client.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = model.generate_content(
+        prompt,
         generation_config=model_config
     )
     return response.text.strip()
@@ -127,9 +127,8 @@ def strip_type(agr: str):
 # Sentiment analysis for response
 def pos_neg(response: str):
     prompt = f"""Classify sentiment. Reply '1' for positive, '0' for negative. Sentence: {response}"""
-    response_heat = client.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response_heat = model.generate_content(
+        prompt,
         generation_config=model_config
     )
     return bool(int(response_heat.text))
@@ -142,9 +141,8 @@ def perform_analysis(atype, impt):
     - "No, The following essential information seems to be missing or unclear: [list]"
     - "No, The provided information is too vague or insufficient."
     """
-    response = client.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = model.generate_content(
+        prompt,
         generation_config=model_config
     )
     return response.text
@@ -153,9 +151,8 @@ def perform_analysis(atype, impt):
 def obtain_information_holes(important_info, extra_info, final_type):
     total_info = important_info + " " + extra_info
     prompt = f"""Identify missing or unclear information for a {final_type} agreement based on: {total_info}."""
-    response = client.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = model.generate_content(
+        prompt,
         generation_config=model_config
     )
     return response.text
@@ -163,9 +160,8 @@ def obtain_information_holes(important_info, extra_info, final_type):
 # Simulate data retrieval
 def get_data(holes: str, final_type: str):
     prompt = f"""Simulate retrieving information for {holes} to generate a {final_type} agreement."""
-    response = client.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = model.generate_content(
+        prompt,
         generation_config=model_config
     )
     return response.text
@@ -215,9 +211,8 @@ async def generate_agreement(request: AgreementRequest):
         """
 
         # Generate agreement
-        response = client.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
+        response = model.generate_content(
+            prompt,
             generation_config=model_config
         )
 
