@@ -68,7 +68,7 @@ def generate_embeddings(cl, etype):
 
 def pos_neg(response: str):
     prompt = f"""
-    Classify the sentiment of the following sentence. 
+    Classify the sentiment of the following sentence.
     Reply with ONLY '1' if the sentence is positive and ONLY '0' if the sentence is negative.
 
     Sentence = {response}
@@ -82,15 +82,15 @@ def pos_neg(response: str):
 
 def strip_type(agr: str):
     agreement_types = ["rent", "nda", "contractor", "employment", "franchise"]
-    prompt = f"""Return the type of agreement that the user is referring to in his input {agr}. Respond in one word, all lowecase. You're responses can only be 
+    prompt = f"""Return the type of agreement that the user is referring to in his input {agr}. Respond in one word, all lowecase. You're responses can only be
     from the set {agreement_types}. Do not use any punctuation. Just respond with the single word."""
     full_prompt = f"""
     Prompt: {prompt}
-    
+
     Possible responses: {agreement_types}
 
     Sentence: {agr}
-    
+
     Respond in one word, only with type. all lowercase.
     """
     response = client.models.generate_content(
@@ -102,8 +102,8 @@ def strip_type(agr: str):
 
 def perform_analysis(atype, impt):
     prompt = f""" You are a legal assistant specialising in determining if the input parameters by the user, defined in {impt} are enough parameters to format an agreement of type
-    {atype}. 
-    
+    {atype}.
+
     Please evaluate if the provided information seems to cover all the generally important aspects for a '{atype}' agreement.
 
     Make sure to evaluate the quality of the input too, if the input seems vague, do consider it as a invalid/bad input.
@@ -126,7 +126,8 @@ def perform_analysis(atype, impt):
         req = True
     else:
         req = False
-        get_user_input()
+        # Consider removing this line as it might lead to unexpected behavior in a web API context.
+        # get_user_input()
 
 def obtain_information_holes():
     global important_info, extra_info, final_type
@@ -135,7 +136,7 @@ def obtain_information_holes():
     prompt = f"""
         The total information given by the user as an input to generate the agreement of type {final_type} are given in {total_info}
 
-        Identify any missing or unclear information needed to generate a {final_type} agreement based on the provided user input: {total_info}. 
+        Identify any missing or unclear information needed to generate a {final_type} agreement based on the provided user input: {total_info}.
         As a comprehensive legal assistant, pinpoint specific details that require clarification or are absent from the input.
 
         Generate your final prompt in a way such that if it is passed into a google search, it gives back the required information.
@@ -153,7 +154,7 @@ def get_data(holes: str):
     search_config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())],
     )
-    
+
     prompt = f"""
     As a LLM, you have identified a few information deficiencies, outlined in {holes} required to generate a LAW agreement of type {final_type}
 
@@ -195,6 +196,11 @@ for j, dataset in enumerate(all_clauses):
         documents.append(clause)
     all_dbs[j].add(embeddings=embeds, ids=ids, documents=documents)
 
+# Define a global variable to hold the prompt for agreement generation
+prompt = """You are a legal assistant tasked with generating a comprehensive legal agreement based on user-provided information and relevant legal clauses.
+Ensure the generated agreement is legally sound, clear, and includes all necessary sections and details.
+Incorporate relevant clauses retrieved from a document database to make the agreement robust and enforceable."""
+
 @app.route('/generate-agreement', methods=['POST'])
 def generate_agreement():
     try:
@@ -203,30 +209,36 @@ def generate_agreement():
         important_info = data.get('important_info')
         extra_info = data.get('extra_info')
 
-        global final_type, important_info, extra_info, req
+        global final_type, req, global_important_info, global_extra_info
         final_type = agreement_type
-        important_info = important_info
-        extra_info = extra_info
+        global_important_info = important_info
+        global_extra_info = extra_info
         req = False
 
-        perform_analysis(agreement_type, important_info)
+        perform_analysis(agreement_type, global_important_info)
         if req:
             info_holes = obtain_information_holes()
             obtained_info = get_data(info_holes)
             dbname = final_type + "_agreements"
             querydb = clientdb.get_collection(name=dbname)
-            query_embed = generate_embeddings(extra_info, False)
+            query_embed = generate_embeddings(global_extra_info, False)
             results = querydb.query(query_embeddings=query_embed, n_results=40)
             relevant_documents = results['documents'][0]
 
             combined_prompt = f"""
                 {prompt}
 
-                Sample Agreements:
+                User Provided Information:
+                Essential Details: {global_important_info}
+                Additional Context: {global_extra_info}
+
+                Sample Agreements (for reference):
                 {sample_agreements}
 
                 Relevant Clauses:
                 {relevant_documents}
+
+                Generate the full legal agreement now, incorporating all the above information.
             """
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
