@@ -17,17 +17,6 @@
             overflow: hidden;
             position: relative;
         }
-        body::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: radial-gradient(circle, rgba(59, 130, 246, 0.2) 0%, transparent 70%);
-            z-index: -1;
-            animation: glow 15s infinite;
-        }
         .chat-container {
             width: 100%;
             max-width: 900px;
@@ -40,10 +29,6 @@
             height: 92vh;
             backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: transform 0.3s;
-        }
-        .chat-container:hover {
-            transform: translateY(-5px) rotateX(2deg) rotateY(2deg);
         }
         .chat-header {
             background: linear-gradient(90deg, #3b82f6, #a855f7);
@@ -74,22 +59,16 @@
             word-wrap: break-word;
             animation: zoomIn 0.4s ease-out;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-            transition: transform 0.2s;
-        }
-        .message:hover {
-            transform: translateY(-2px);
         }
         .bot-message {
             background: linear-gradient(145deg, #1e40af, #3b82f6);
             color: #ffffff;
             align-self: flex-start;
-            border-bottom-left-radius: 4px;
         }
         .user-message {
             background: linear-gradient(145deg, #6b7280, #9ca3af);
             color: #ffffff;
             align-self: flex-end;
-            border-bottom-right-radius: 4px;
         }
         .chat-footer {
             padding: 24px;
@@ -111,12 +90,6 @@
             resize: none;
             overflow-y: auto;
             max-height: 140px;
-            transition: border-color 0.3s, box-shadow 0.3s;
-        }
-        .input-field:focus {
-            border-color: #3b82f6;
-            box-shadow: 0 0 15px rgba(59, 130, 246, 0.7);
-            animation: pulseGlow 1.5s infinite;
         }
         .send-button {
             padding: 16px 28px;
@@ -127,75 +100,6 @@
             cursor: pointer;
             font-size: 1em;
             font-weight: 500;
-            position: relative;
-            overflow: hidden;
-            transition: box-shadow 0.3s;
-        }
-        .send-button:hover {
-            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
-        }
-        .send-button:disabled {
-            background: #475569;
-            cursor: not-allowed;
-            box-shadow: none;
-        }
-        .send-button::after {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 0;
-            height: 0;
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 50%;
-            transform: translate(-50%, -50%);
-            transition: width 0.4s, height 0.4s;
-        }
-        .send-button:active::after {
-            width: 200px;
-            height: 200px;
-            opacity: 0;
-        }
-        .typing-indicator {
-            display: none;
-            font-size: 0.9em;
-            color: #94a3b8;
-            padding: 14px 30px;
-            animation: neonPulse 1.5s infinite;
-        }
-        .typing-indicator.active {
-            display: block;
-        }
-        @keyframes zoomIn {
-            from { opacity: 0; transform: scale(0.8); }
-            to { opacity: 1; transform: scale(1); }
-        }
-        @keyframes pulseGlow {
-            0%, 100% { box-shadow: 0 0 15px rgba(59, 130, 246, 0.7); }
-            50% { box-shadow: 0 0 25px rgba(59, 130, 246, 1); }
-        }
-        @keyframes neonPulse {
-            0%, 100% { opacity: 0.6; text-shadow: 0 0 5px rgba(59, 130, 246, 0.5); }
-            50% { opacity: 1; text-shadow: 0 0 10px rgba(59, 130, 246, 1); }
-        }
-        @keyframes glow {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-        ::-webkit-scrollbar {
-            width: 12px;
-        }
-        ::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: linear-gradient(180deg, #3b82f6, #a855f7);
-            border-radius: 12px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(180deg, #2563eb, #9333ea);
         }
     </style>
 </head>
@@ -224,10 +128,10 @@
             textarea.style.height = `${textarea.scrollHeight}px`;
         }
 
-        function addMessage(content, isUser = false) {
+        function addMessage(content, isUser  = false) {
             const chatBody = document.getElementById('chat-body');
             const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
+            messageDiv.className = `message ${isUser  ? 'user-message' : 'bot-message'}`;
             messageDiv.textContent = content;
             chatBody.appendChild(messageDiv);
             chatBody.scrollTop = chatBody.scrollHeight;
@@ -279,19 +183,9 @@
                     });
                     const data = await response.json();
                     showTypingIndicator(false);
-                    if (data.error) {
-                        addMessage(`Error: ${data.error}`);
-                    } else if (data.response === 'Please provide more information.') {
-                        addMessage(data.response);
-                        addMessage(`Let's refine the details. Please provide more information for the ${agreementData.agreement_type} agreement (e.g., parties involved, duration, financial terms).`);
-                        step = 2;
-                    } else {
-                        addMessage('Your professional agreement is ready:');
-                        addMessage(data.response);
-                        addMessage('Ready to create another masterpiece? Please specify the agreement type.');
-                        step = 1;
-                        agreementData = { agreement_type: '', important_info: '', extra_info: '' };
-                    }
+                    addMessage(data.response);
+                    step = 1;
+                    agreementData = { agreement_type: '', important_info: '', extra_info: '' };
                 } catch (error) {
                     showTypingIndicator(false);
                     addMessage(`Error: ${error.message}`);

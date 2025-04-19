@@ -1,10 +1,4 @@
-fastapi==0.109.1
-uvicorn==0.27.1
-chromadb==0.4.24
-python-docx==0.8.11
-google-generativeai==0.5.2
-numpy==1.26.4
-pandas==2.2.1
-pydantic==2.6.4
-typing-extensions==4.10.0
-python-multipart==0.0.6
+Flask
+google-genai==1.7.0
+python-docx
+chromadb

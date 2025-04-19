@@ -1,148 +1,90 @@
+from flask import Flask, request, jsonify, send_from_directory
 import os
 import time
 import chromadb
+from google import genai
+from google.genai import types
 from docx import Document
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from google.api_core import retry
-import google.generativeai as genai
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 
-# Initialize FastAPI
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = Flask(__name__, static_folder='frontend')
 
-# Configuration
-GOOGLE_API_KEY = "AIzaSyAQeDHegBbQZ_0-oGS_KxvBPrGvU9Nfcns"  # Consider using environment variables
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')
-model_config = genai.types.GenerationConfig(temperature=0.75, top_p=0.9)
+# Initialize Google API Client with your API key
+GOOGLE_API_KEY = "AIzaSyAlZXQHr4PN5Po0KeNPGfYFjuYaI3jMcB0"
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# File Path Setup
-BASE_DIR = Path(__file__).parent
-CLAUSES_DIR = BASE_DIR / "Clauses"
-SAMPLES_DIR = BASE_DIR / "sampleagreements"
-
-# ChromaDB Setup
-clientdb = chromadb.PersistentClient(path=str(BASE_DIR / "chromadb_data"))
-dbs = {
+# Initialize ChromaDB Client
+clientdb = chromadb.Client()
+# Create or get collections
+collections = {
     "rent": clientdb.get_or_create_collection(name="rent_agreements"),
     "nda": clientdb.get_or_create_collection(name="nda_agreements"),
     "employment": clientdb.get_or_create_collection(name="employ_agreements"),
     "franchise": clientdb.get_or_create_collection(name="franch_agreements"),
-    "contractor": clientdb.get_or_create_collection(name="contract_agreements")
+    "contract": clientdb.get_or_create_collection(name="contract_agreements"),
 }
 
-class AgreementRequest(BaseModel):
-    agreement_type: str
-    important_info: str
-    extra_info: str
+# Function to read DOCX files
+def read_docx(endname):
+    path = f"/kaggle/input/agreement-clauses-capstone/{endname}.docx"  # Updated path
+    doc = Document(path)
+    paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
+    return paragraphs
 
-# Helper Functions
-def read_docx(file_path):
-    try:
-        return [p.text for p in Document(file_path).paragraphs if p.text.strip()]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading {file_path}: {str(e)}")
+# Function to generate embeddings
+def generate_embeddings(cl, etype):
+    if etype:
+        embedding_task = "retrieval_document"
+    else:
+        embedding_task = "retrieval_query"
+    embed = client.models.embed_content(
+        model="models/text-embedding-004",
+        contents=cl,
+        config=types.EmbedContentConfig(task_type=embedding_task)
+    )
+    return [e.values for e in embed.embeddings]
 
-def get_sample_paths(agreement_type):
-    type_dir = SAMPLES_DIR / agreement_type / agreement_type
-    if not type_dir.exists():
-        raise HTTPException(status_code=404, detail=f"Sample directory not found: {type_dir}")
-    return [str(f) for f in type_dir.glob("*.docx")]
+# Function to perform analysis on user input
+def perform_analysis(agreement_type, important_info):
+    prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in {important_info} are enough parameters to format an agreement of type {agreement_type}. 
+    Please evaluate if the provided information seems to cover all the generally important aspects for a '{agreement_type}' agreement.
+    Your evaluation must be extremely strict and precise. Any vagueness/lack of information must be considered a severe defect.
+    Respond with ONLY these messages, no others.
+    - "Yes. All essential information seems to be present." if the input appears comprehensive.
+    - "No, The following essential information seems to be missing or unclear: [list of missing/unclear aspects]" if key details appear to be absent.
+    - "No, The provided information is too vague or insufficient." if the input is very brief or lacks substantial details.
+    """
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.75, top_p=0.9)
+    )
+    return response.text
 
-@retry.Retry(predicate=lambda e: isinstance(e, genai.APIError) and e.code in {429, 503})
-def generate_embeddings(content, is_doc=True):
-    try:
-        embed = genai.embed_content(
-            model='models/text-embedding-004',
-            content=content,
-            task_type="retrieval_document" if is_doc else "retrieval_query"
-        )
-        return [e.values for e in embed.embeddings][0]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding generation failed: {str(e)}")
+# Endpoint to serve the index.html
+@app.route('/')
+def serve_index():
+    return send_from_directory('frontend', 'index.html')
 
-def initialize_db():
-    for agreement_type, db in dbs.items():
-        clause_file = CLAUSES_DIR / f"{agreement_type}.docx"
-        if not clause_file.exists():
-            raise HTTPException(status_code=404, detail=f"Clause file not found: {clause_file}")
-        
-        clauses = read_docx(clause_file)
-        try:
-            db.add(
-                embeddings=[generate_embeddings(c) for c in clauses],
-                ids=[f"{agreement_type}-{i}" for i in range(len(clauses))],
-                documents=clauses
-            )
-            time.sleep(0.4)  # Rate limiting
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"DB initialization failed: {str(e)}")
+# Endpoint to generate agreement
+@app.route('/generate-agreement', methods=['POST'])
+def generate_agreement():
+    data = request.json
+    agreement_type = data['agreement_type']
+    important_info = data['important_info']
+    extra_info = data['extra_info']
 
-# Initialize database on startup
-initialize_db()
+    # Perform analysis on the provided information
+    analysis_result = perform_analysis(agreement_type, important_info)
 
-# API Endpoint
-@app.post("/generate-agreement")
-async def generate_agreement(request: AgreementRequest):
-    try:
-        # Standardize agreement type
-        agreement_type = model.generate_content(
-            f"Return agreement type (rent/nda/contractor/employment/franchise). Input: {request.agreement_type}",
-            generation_config=model_config
-        ).text.strip().lower()
+    # Mock response for demonstration
+    response = {
+        "response": f"Generated {agreement_type} agreement with details: {important_info}, {extra_info}. Analysis result: {analysis_result}"
+    }
 
-        # Validate input sufficiency
-        analysis = model.generate_content(
-            f"Evaluate if '{request.important_info}' is sufficient for '{agreement_type}' agreement. "
-            "Respond 'Yes. All essential information seems to be present.' or list missing info.",
-            generation_config=model_config
-        ).text
-        
-        if "Yes" not in analysis:
-            return {"response": "Please provide more information.", "error": analysis}
+    # Here you would implement the logic to generate the actual agreement
+    # For example, using the provided information to create a legal document
 
-        # Retrieve relevant clauses
-        db = dbs.get(agreement_type)
-        if not db:
-            raise HTTPException(status_code=400, detail="Invalid agreement type")
-            
-        results = db.query(
-            query_embeddings=[generate_embeddings(request.extra_info, False)],
-            n_results=40
-        )
-        relevant_clauses = results['documents'][0] if results['documents'] else []
+    return jsonify(response)
 
-        # Generate agreement
-        agreement = model.generate_content(
-            f"""Generate {agreement_type} agreement with:
-            - Key info: {request.important_info}
-            - Extra details: {request.extra_info}
-            - Relevant clauses: {relevant_clauses}
-            - Samples: {get_sample_paths(agreement_type)}
-            """,
-            generation_config=model_config
-        ).text
-
-        return {"response": agreement, "error": None}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agreement generation failed: {str(e)}")
-
-# Serve frontend
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
