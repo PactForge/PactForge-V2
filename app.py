@@ -40,7 +40,7 @@ from flask import Flask, request, jsonify, send_from_directory
  
 
  # Initialize Google API Client with your API key (HARDCODED - UNSAFE)
- GOOGLE_API_KEY = "AIzaSyDZX1Hia3b62GpWHRGM3T-t5J7oyVEu0tg"  # Replaced with your API key
+ GOOGLE_API_KEY = "AIzaSyDZX1Hia3b62GpWHRGM3T-t5J7oyVEu0tg"  # YOUR API KEY
  genai.configure(api_key=GOOGLE_API_KEY)
  client = genai.GenerativeModel(model_name="gemini-pro")
  
