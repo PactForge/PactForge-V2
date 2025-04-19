@@ -1,90 +1,78 @@
-from flask import Flask, request, jsonify, send_from_directory
-import os
-import time
-import chromadb
-from google import genai
-from google.genai import types
-from docx import Document
+from flask import Flask, request, jsonify
+from datetime import datetime
 
-app = Flask(__name__, static_folder='.')  # Serve static files from the current directory
+app = Flask(__name__)
 
-# Initialize Google API Client with your API key
-GOOGLE_API_KEY = "AIzaSyAlZXQHr4PN5Po0KeNPGfYFjuYaI3jMcB0"
-client = genai.Client(api_key=GOOGLE_API_KEY)
+def analyze_intent(agreement_type, important_info, extra_info):
+    analysis_result = ""
 
-# Initialize ChromaDB Client
-clientdb = chromadb.Client()
-# Create or get collections
-collections = {
-    "rent": clientdb.get_or_create_collection(name="rent_agreements"),
-    "nda": clientdb.get_or_create_collection(name="nda_agreements"),
-    "employment": clientdb.get_or_create_collection(name="employ_agreements"),
-    "franchise": clientdb.get_or_create_collection(name="franch_agreements"),
-    "contract": clientdb.get_or_create_collection(name="contract_agreements"),
-}
+    if not agreement_type:
+        analysis_result += "Please specify the type of legal agreement you need (e.g., NDA, Lease Agreement, Employment Contract).\n"
+        return analysis_result
 
-# Function to read DOCX files
-def read_docx(endname):
-    path = f"/kaggle/input/agreement-clauses-capstone/{endname}.docx"  # Updated path
-    doc = Document(path)
-    paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
-    return paragraphs
+    analysis_result += f"Analyzing request for a '{agreement_type}' agreement.\n"
 
-# Function to generate embeddings
-def generate_embeddings(cl, etype):
-    if etype:
-        embedding_task = "retrieval_document"
+    if not important_info:
+        analysis_result += "Please provide the key details relevant to this agreement, such as the parties involved, the subject matter, and the duration or key terms.\n"
     else:
-        embedding_task = "retrieval_query"
-    embed = client.models.embed_content(
-        model="models/text-embedding-004",
-        contents=cl,
-        config=types.EmbedContentConfig(task_type=embedding_task)
-    )
-    return [e.values for e in embed.embeddings]
+        analysis_result += f"Key details provided: '{important_info}'.\n"
 
-# Function to perform analysis on user input
-def perform_analysis(agreement_type, important_info):
-    prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in {important_info} are enough parameters to format an agreement of type {agreement_type}.
-    Please evaluate if the provided information seems to cover all the generally important aspects for a '{agreement_type}' agreement.
-    Your evaluation must be extremely strict and precise. Any vagueness/lack of information must be considered a severe defect.
-    Respond with ONLY these messages, no others.
-    - "Yes. All essential information seems to be present." if the input appears comprehensive.
-    - "No, The following essential information seems to be missing or unclear: [list of missing/unclear aspects]" if key details appear to be absent.
-    - "No, The provided information is too vague or insufficient." if the input is very brief or lacks substantial details.
-    """
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.75, top_p=0.9)
-    )
-    return response.text
+    if extra_info:
+        analysis_result += f"Additional details or specific clauses mentioned: '{extra_info}'.\n"
+    else:
+        analysis_result += "Consider adding any specific clauses or customization requirements you have for this agreement.\n"
 
-# Endpoint to serve the index.html
-@app.route('/')
-def serve_index():
-    return send_from_directory('.', 'index.html')  # Serve from the current directory
+    analysis_result += "\nTo generate a comprehensive and accurate agreement, please ensure you provide sufficient details."
+    return analysis_result
 
-# Endpoint to generate agreement
+def generate_agreement(agreement_type, important_info, extra_info):
+    analysis = analyze_intent(agreement_type, important_info, extra_info)
+    if "Please specify the type of legal agreement" in analysis or "Please provide the key details" in analysis:
+        return analysis
+
+    # --- Basic Agreement Generation Logic (Illustrative) ---
+    if agreement_type.lower() == "nda":
+        return f"""Generated Non-Disclosure Agreement based on the provided information:
+        - General Details: {important_info}
+        - Specific Clauses: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    elif agreement_type.lower() == "lease agreement":
+        return f"""Generated Lease Agreement based on the provided information:
+        - Key Terms: {important_info}
+        - Additional Clauses: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    elif agreement_type.lower() == "employment agreement":
+        return f"""Generated Employment Agreement based on the provided information:
+        - Core Details: {important_info}
+        - Further Stipulations: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    elif agreement_type.lower() == "franchise agreement":
+        return f"""Generated Franchise Agreement based on the provided information:
+        - Basic Information: {important_info}
+        - Specific Terms: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    elif agreement_type.lower() == "contractor agreement":
+        return f"""Generated Contractor Agreement based on the provided information:
+        - Project Overview: {important_info}
+        - Additional Stipulations: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    elif agreement_type.lower() == "rent agreement":
+        return f"""Generated Rent Agreement based on the provided information:
+        - Property and Parties: {important_info}
+        - Rental Terms: {extra_info}
+        This is a preliminary draft and requires thorough review and customization."""
+    else:
+        return f"Agreement type '{agreement_type}' is not currently supported for full generation. Analysis: {analysis}"
+
 @app.route('/generate-agreement', methods=['POST'])
-def generate_agreement():
-    data = request.json
-    agreement_type = data['agreement_type']
-    important_info = data['important_info']
-    extra_info = data['extra_info']
+def handle_generation():
+    data = request.get_json()
+    agreement_type = data.get('agreement_type', '')
+    important_info = data.get('important_info', '')
+    extra_info = data.get('extra_info', '')
 
-    # Perform analysis on the provided information
-    analysis_result = perform_analysis(agreement_type, important_info)
-
-    # Mock response for demonstration
-    response = {
-        "response": f"Generated {agreement_type} agreement with details: {important_info}, {extra_info}. Analysis result: {analysis_result}"
-    }
-
-    # Here you would implement the logic to generate the actual agreement
-    # For example, using the provided information to create a legal document
-
-    return jsonify(response)
+    response_text = generate_agreement(agreement_type, important_info, extra_info)
+    return jsonify({'response': response_text})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    app.run(debug=True, host='0.0.0.0', port=5000)
