@@ -2,3 +2,4 @@ Flask
 google-genai==1.7.0
 python-docx
 chromadb
+gunicorn
