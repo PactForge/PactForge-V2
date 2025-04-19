@@ -1,78 +1,140 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
+import os
+from google import genai
+from google.genai import types
+from google.api_core import retry
+from flask_cors import CORS
+from docx import Document
+import chromadb
+import numpy as np
+import re
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS
 
-def analyze_intent(agreement_type, important_info, extra_info):
-    analysis_result = ""
+# --- Gemini API Setup ---
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    print("Error: GOOGLE_API_KEY environment variable not set.")
+    exit()
 
-    if not agreement_type:
-        analysis_result += "Please specify the type of legal agreement you need (e.g., NDA, Lease Agreement, Employment Contract).\n"
-        return analysis_result
+genai.configure(api_key=GOOGLE_API_KEY)
+model_config = types.GenerateContentConfig(
+    temperature=0.75,
+    top_p=0.9,
+)
+generation_model = genai.GenerativeModel(model_name="gemini-pro", generation_config=model_config)
 
-    analysis_result += f"Analyzing request for a '{agreement_type}' agreement.\n"
+is_retriable = lambda e: (isinstance(e, genai.errors.APIError) and e.code in {429, 503})
 
-    if not important_info:
-        analysis_result += "Please provide the key details relevant to this agreement, such as the parties involved, the subject matter, and the duration or key terms.\n"
-    else:
-        analysis_result += f"Key details provided: '{important_info}'.\n"
+# --- Language-Specific NLP and Embedding Model (Placeholder -  ***CRITICAL TO IMPLEMENT*** ) ---
+# from sentence_transformers import SentenceTransformer
+# embedding_model = SentenceTransformer('your-multilingual-model')
 
-    if extra_info:
-        analysis_result += f"Additional details or specific clauses mentioned: '{extra_info}'.\n"
-    else:
-        analysis_result += "Consider adding any specific clauses or customization requirements you have for this agreement.\n"
+def clean_text(text):
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-    analysis_result += "\nTo generate a comprehensive and accurate agreement, please ensure you provide sufficient details."
-    return analysis_result
+def extract_keywords_and_intent(user_input_language):
+    # *** REPLACE THIS PLACEHOLDER WITH YOUR LANGUAGE-SPECIFIC NLP ***
+    keywords = [word for word in clean_text(user_input_language).lower().split() if len(word) > 2]
+    intent = "franchise_agreement"  # Improve intent detection
+    return keywords, intent
 
-def generate_agreement(agreement_type, important_info, extra_info):
-    analysis = analyze_intent(agreement_type, important_info, extra_info)
-    if "Please specify the type of legal agreement" in analysis or "Please provide the key details" in analysis:
-        return analysis
+def generate_embeddings_language(text_list):
+    # *** REPLACE THIS PLACEHOLDER WITH YOUR EMBEDDING GENERATION ***
+    # embeddings = embedding_model.encode(text_list)
+    return [np.random.rand(768).tolist() for _ in text_list]  # Dummy embeddings
 
-    # --- Basic Agreement Generation Logic (Illustrative) ---
-    if agreement_type.lower() == "nda":
-        return f"""Generated Non-Disclosure Agreement based on the provided information:
-        - General Details: {important_info}
-        - Specific Clauses: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    elif agreement_type.lower() == "lease agreement":
-        return f"""Generated Lease Agreement based on the provided information:
-        - Key Terms: {important_info}
-        - Additional Clauses: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    elif agreement_type.lower() == "employment agreement":
-        return f"""Generated Employment Agreement based on the provided information:
-        - Core Details: {important_info}
-        - Further Stipulations: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    elif agreement_type.lower() == "franchise agreement":
-        return f"""Generated Franchise Agreement based on the provided information:
-        - Basic Information: {important_info}
-        - Specific Terms: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    elif agreement_type.lower() == "contractor agreement":
-        return f"""Generated Contractor Agreement based on the provided information:
-        - Project Overview: {important_info}
-        - Additional Stipulations: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    elif agreement_type.lower() == "rent agreement":
-        return f"""Generated Rent Agreement based on the provided information:
-        - Property and Parties: {important_info}
-        - Rental Terms: {extra_info}
-        This is a preliminary draft and requires thorough review and customization."""
-    else:
-        return f"Agreement type '{agreement_type}' is not currently supported for full generation. Analysis: {analysis}"
+# --- ChromaDB Setup ---
+CHROMA_CLIENT = chromadb.HttpClient(host="your_chromadb_host", port="your_chromadb_port")  # Replace
+CLAUSE_COLLECTION_NAME = "legal_clauses_franchise"
+clause_collection = CHROMA_CLIENT.get_or_create_collection(name=CLAUSE_COLLECTION_NAME)
 
+def load_clauses_into_chroma(docx_file_path):
+    try:
+        doc = Document(docx_file_path)
+        clauses = [clean_text(p.text) for p in doc.paragraphs if clean_text(p.text)]
+        embeddings = generate_embeddings_language(clauses)
+        ids = [f"clause-{i}" for i in range(len(clauses))]
+        clause_collection.add(embeddings=embeddings, ids=ids, documents=clauses)
+        print(f"Successfully loaded clauses from {docx_file_path} into ChromaDB.")
+    except Exception as e:
+        print(f"Error loading clauses from {docx_file_path}: {e}")
+
+# Load clauses (ONE-TIME SETUP)
+# Example:
+# load_clauses_into_chroma("franchise.docx")
+
+# --- Clause Retrieval ---
+def retrieve_relevant_clauses(user_input_language, top_n=5):
+    try:
+        input_embedding = generate_embeddings_language([user_input_language])[0]
+        results = clause_collection.query(
+            query_embeddings=[input_embedding],
+            n_results=top_n
+        )
+        return results['documents']
+    except Exception as e:
+        print(f"Error retrieving clauses: {e}")
+        return []
+
+# --- Agreement Template (Basic Example - Expand) ---
+agreement_templates = {
+    "franchise_agreement": """
+    FRANCHISE AGREEMENT
+
+    [INTRODUCTION]
+
+    1.  GRANT OF FRANCHISE: [GRANT_CLAUSE]
+
+    2.  TERRITORY: [TERRITORY_CLAUSE]
+
+    ...
+
+    [OTHER_CLAUSES]
+
+    [CONCLUSION]
+    """
+}
+
+def fill_agreement_template(template, clauses):
+    filled_template = template
+    filled_template = filled_template.replace("[GRANT_CLAUSE]", clauses[0] if len(clauses) > 0 else "")
+    filled_template = filled_template.replace("[TERRITORY_CLAUSE]", clauses[1] if len(clauses) > 1 else "")
+    filled_template = filled_template.replace("[OTHER_CLAUSES]", "\n".join(clauses[2:]))
+    return filled_template
+
+# --- Main Agreement Generation ---
 @app.route('/generate-agreement', methods=['POST'])
 def handle_generation():
     data = request.get_json()
-    agreement_type = data.get('agreement_type', '')
-    important_info = data.get('important_info', '')
-    extra_info = data.get('extra_info', '')
+    user_input_language = data.get('user_input', '')
 
-    response_text = generate_agreement(agreement_type, important_info, extra_info)
-    return jsonify({'response': response_text})
+    if not user_input_language:
+        return jsonify({'response': "Please provide your request."})
+
+    try:
+        keywords, intent = extract_keywords_and_intent(user_input_language)
+        relevant_clauses = retrieve_relevant_clauses(user_input_language)
+
+        agreement_template = agreement_templates.get(intent, agreement_templates["franchise_agreement"])
+        filled_agreement = fill_agreement_template(agreement_template, relevant_clauses)
+
+        prompt = f"""You are a helpful AI assistant for generating franchise agreements.
+        The user's request is: {user_input_language}
+        Here are relevant clauses: {relevant_clauses}
+        Here is a template: {agreement_template}
+
+        Generate a complete and legally sound franchise agreement, incorporating the clauses into the template.
+        """
+
+        response = generation_model.generate_content(prompt)
+        generated_text = response.text + "\n\n" + filled_agreement
+        return jsonify({'response': generated_text})
+
+    except Exception as e:
+        return jsonify({'response': f"Error: {str(e)}"})
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
