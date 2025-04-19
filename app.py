@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from docx import Document
 
-app = Flask(__name__, static_folder='frontend')
+app = Flask(__name__, static_folder='.')  # Serve static files from the current directory
 
 # Initialize Google API Client with your API key
 GOOGLE_API_KEY = "AIzaSyAlZXQHr4PN5Po0KeNPGfYFjuYaI3jMcB0"
@@ -45,7 +45,7 @@ def generate_embeddings(cl, etype):
 
 # Function to perform analysis on user input
 def perform_analysis(agreement_type, important_info):
-    prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in {important_info} are enough parameters to format an agreement of type {agreement_type}. 
+    prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in {important_info} are enough parameters to format an agreement of type {agreement_type}.
     Please evaluate if the provided information seems to cover all the generally important aspects for a '{agreement_type}' agreement.
     Your evaluation must be extremely strict and precise. Any vagueness/lack of information must be considered a severe defect.
     Respond with ONLY these messages, no others.
@@ -63,7 +63,7 @@ def perform_analysis(agreement_type, important_info):
 # Endpoint to serve the index.html
 @app.route('/')
 def serve_index():
-    return send_from_directory('frontend', 'index.html')
+    return send_from_directory('.', 'index.html')  # Serve from the current directory
 
 # Endpoint to generate agreement
 @app.route('/generate-agreement', methods=['POST'])
@@ -87,4 +87,4 @@ def generate_agreement():
     return jsonify(response)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=10000)
