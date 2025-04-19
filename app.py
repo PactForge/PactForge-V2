@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify, send_from_directory
  from google.api_core import retry
  import spacy
  import logging
+ import subprocess  # Import subprocess
  
 
  app = Flask(__name__, static_folder='frontend')
@@ -18,12 +19,28 @@ from flask import Flask, request, jsonify, send_from_directory
   format='%(asctime)s - %(levelname)s - %(message)s')
  
 
- # Load the spaCy model for NLP
- nlp = spacy.load("en_core_web_sm")
+ # Function to load spaCy model with error handling
+ def load_spacy_model():
+  try:
+  nlp = spacy.load("en_core_web_sm")
+  return nlp
+  except OSError:
+  logging.info("en_core_web_sm model not found. Downloading...")
+  try:
+  subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
+  nlp = spacy.load("en_core_web_sm")
+  return nlp
+  except subprocess.CalledProcessError as e:
+  logging.error(f"Error downloading or loading spaCy model: {e}")
+  raise RuntimeError("Failed to download or load spaCy model") from e
+ 
+
+ # Load the spaCy model
+ nlp = load_spacy_model()
  
 
  # Initialize Google API Client with your API key (HARDCODED - UNSAFE)
- GOOGLE_API_KEY = "YOUR_ACTUAL_GOOGLE_API_KEY"  # REPLACE THIS!
+ GOOGLE_API_KEY = "AIzaSyDZX1Hia3b62GpWHRGM3T-t5J7oyVEu0tg"  # Replaced with your API key
  genai.configure(api_key=GOOGLE_API_KEY)
  client = genai.GenerativeModel(model_name="gemini-pro")
  
