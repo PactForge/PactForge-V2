@@ -1,160 +1,182 @@
-from flask import Flask, request, jsonify, send_from_directory
- import os
- import time
- import chromadb
- from google import genai
- from google.genai import types
- from docx import Document
- from google.api_core import retry
- import spacy
- import logging
- import subprocess  # Import subprocess
- 
+from flask import Flask, render_template, request, jsonify
+import os
+import time
+import numpy as np
+from google.api_core import retry
+import requests
+from docx import Document
+import chromadb
+from chromadb.config import Settings
 
- app = Flask(__name__, static_folder='frontend')
- 
+app = Flask(__name__)
 
- # Configure logging
- logging.basicConfig(level=logging.INFO,
-  format='%(asctime)s - %(levelname)s - %(message)s')
- 
+# Configuration
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', 'AIzaSyAsiNYu4XPPYtco4G7sDsTay_T6tlmptPk')
+MODEL_CONFIG = {
+    'temperature': 0.75,
+    'top_p': 0.9
+}
 
- # Function to load spaCy model with error handling
- def load_spacy_model():
-  try:
-  nlp = spacy.load("en_core_web_sm")
-  return nlp
-  except OSError:
-  logging.info("en_core_web_sm model not found. Downloading...")
-  try:
-  subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
-  nlp = spacy.load("en_core_web_sm")
-  return nlp
-  except subprocess.CalledProcessError as e:
-  logging.error(f"Error downloading or loading spaCy model: {e}")
-  raise RuntimeError("Failed to download or load spaCy model") from e
- 
+# Initialize ChromaDB client
+clientdb = chromadb.Client(Settings(persist_directory="./chroma_db"))
+all_dbs = {
+    'rent': clientdb.get_or_create_collection(name="rent_agreements"),
+    'nda': clientdb.get_or_create_collection(name="nda_agreements"),
+    'employment': clientdb.get_or_create_collection(name="employ_agreements"),
+    'franchise': clientdb.get_or_create_collection(name="franch_agreements"),
+    'contractor': clientdb.get_or_create_collection(name="contract_agreements")
+}
 
- # Load the spaCy model
- nlp = load_spacy_model()
- 
+# Load sample data
+def read_docx(filename, directory):
+    path = os.path.join(directory, f"{filename}.docx")
+    if not os.path.exists(path):
+        # Mock data if file doesn't exist
+        return [f"Mock {filename} clause {i}" for i in range(2)]
+    doc = Document(path)
+    return [p.text for p in doc.paragraphs if p.text.strip()]
 
- # Initialize Google API Client with your API key (HARDCODED - UNSAFE)
- GOOGLE_API_KEY = "AIzaSyDZX1Hia3b62GpWHRGM3T-t5J7oyVEu0tg"  # YOUR API KEY
- genai.configure(api_key=GOOGLE_API_KEY)
- client = genai.GenerativeModel(model_name="gemini-pro")
- 
+def extract_samples(endname):
+    dataset_path = f"sampleagreements/{endname}"
+    docx_files = []
+    if os.path.exists(dataset_path):
+        for item in os.listdir(dataset_path):
+            item_path = os.path.join(dataset_path, item)
+            if os.path.isfile(item_path) and item.lower().endswith('.docx'):
+                docx_files.append(item_path)
+    return docx_files or [f"Mock {endname} agreement"]
 
- # Initialize ChromaDB Client (Adjust for persistence!)
- # This is an in-memory client. For production, use persistent storage.
- clientdb = chromadb.Client()
- collections = {
-  "rent": clientdb.get_or_create_collection(name="rent_agreements"),
-  "nda": clientdb.get_or_create_collection(name="nda_agreements"),
-  "employment": clientdb.get_or_create_collection(name="employ_agreements"),
-  "franchise": clientdb.get_or_create_collection(name="franch_agreements"),
-  "contract": clientdb.get_or_create_collection(name="contract_agreements"),
- }
- 
+# Load clauses and store in ChromaDB
+agreement_types = ['rent', 'nda', 'employment', 'franchise', 'contractor']
+all_clauses = {atype: read_docx(atype, 'Clauses') for atype in agreement_types}
 
- # Function to read DOCX files
- def read_docx(endname):
-  path = f"sampleagreements/{endname}.docx"
-  try:
-  doc = Document(path)
-  paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
-  return paragraphs
-  except FileNotFoundError:
-  logging.error(f"DOCX file not found: {path}")
-  return []
-  except Exception as e:
-  logging.error(f"Error reading DOCX file: {e}")
-  return []
- 
+for j, atype in enumerate(agreement_types):
+    embeds = []
+    ids = []
+    documents = []
+    for i, clause in enumerate(all_clauses[atype]):
+        vector = generate_embeddings([clause], True)[0]
+        embeds.append(vector)
+        ids.append(f"clause-{j}-{i}")
+        documents.append(clause)
+        time.sleep(0.4)  # Avoid API rate limits
+    all_dbs[atype].add(embeddings=embeds, ids=ids, documents=documents)
 
- # Function to generate embeddings
- @retry.Retry(predicate=lambda e: isinstance(e, genai.types.GoogleGenerativeAIError) and e.code in {429, 503})
- def generate_embeddings(cl, etype):
-  embedding_task = "retrieval_document" if etype else "retrieval_query"
-  try:
-  embed = client.embed_content(
-  model="models/embedding-001",
-  contents=cl,
-  task_type=embedding_task
-  )
-  return [e.values for e in embed['embedding'].values]
-  except Exception as e:
-  logging.error(f"Error generating embeddings: {e}")
-  return []
- 
+# Global state
+agreement_data = {'agreement_type': '', 'important_info': '', 'extra_info': ''}
+step = 1
+req = False
+final_type = ''
+important_info = ''
+extra_info = ''
+obtained_info = ''
 
- # Function to analyze user input using NLP
- def analyze_input(user_input):
-  doc = nlp(user_input)
-  keywords = [token.lemma_ for token in doc if token.is_alpha and not token.is_stop]
-  return keywords
- 
+# Retry mechanism
+def is_retriable(e):
+    return '429' in str(e) or '503' in str(e)
 
- # Function to perform analysis on user input
- def perform_analysis(agreement_type, important_info):
-  prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in {important_info} are enough parameters to format an agreement of type {agreement_type}. 
-  Please evaluate if the provided information seems to cover all the generally important aspects for a '{agreement_type}' agreement.
-  Your evaluation must be extremely strict and precise. Any vagueness/lack of information must be considered a severe defect.
-  Respond with ONLY these messages, no others.
-  - "Yes. All essential information seems to be present." if the input appears comprehensive.
-  - "No, The following essential information seems to be missing or unclear: [list of missing/unclear aspects]" if key details appear to be absent.
-  - "No, The provided information is too vague or insufficient." if the input is very brief or lacks substantial details.
-  """
-  try:
-  response = client.generate_content(
-  model="gemini-pro",
-  generation_config=types.GenerationConfig(temperature=0.75, top_p=0.9)
-  )
-  return response.text
-  except Exception as e:
-  logging.error(f"Error performing analysis: {e}")
-  return "Error performing analysis."
- 
+@retry.Retry(predicate=is_retriable)
+def generate_content(prompt, model='gemini-2.0-flash'):
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GOOGLE_API_KEY}'
+    response = requests.post(url, json={
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': MODEL_CONFIG
+    })
+    data = response.json()
+    if 'error' in data:
+        raise Exception(data['error']['message'])
+    return data['candidates'][0]['content']['parts'][0]['text']
 
- @app.route('/')
- def serve_index():
-  return send_from_directory('frontend', 'index.html')
- 
+@retry.Retry(predicate=is_retriable)
+def generate_embeddings(cl, etype):
+    # Mock embedding generation (replace with Gemini embedContent in production)
+    # In production: Use https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent
+    task_type = "retrieval_document" if etype else "retrieval_query"
+    return [[np.random.rand(768).tolist() for _ in range(len(cl))][0]]
 
- @app.route('/generate-agreement', methods=['POST'])
- def generate_agreement():
-  data = request.get_json()
-  if not data:
-  return jsonify({"error": "No data provided"}), 400
-  agreement_type = data.get('agreement_type')
-  important_info = data.get('important_info')
-  extra_info = data.get('extra_info')
- 
+# Utility functions
+def query_similar_clauses(query, agreement_type):
+    querydb = all_dbs.get(agreement_type)
+    if not querydb:
+        return []
+    query_embed = generate_embeddings([query], False)[0]
+    results = querydb.query(query_embeddings=[query_embed], n_results=40)
+    return results['documents'][0] if results['documents'] else []
 
-  if not all([agreement_type, important_info, extra_info]):
-  return jsonify({"error": "Missing required fields"}), 400
- 
+def strip_type(agr):
+    agreement_types = ['rent', 'nda', 'contractor', 'employment', 'franchise']
+    prompt = f"""Return the type of agreement that the user is referring to in his input "{agr}". Respond in one word, all lowercase. Your responses can only be from the set {agreement_types}. Do not use any punctuation."""
+    return generate_content(prompt)
 
-  try:
-  # Analyze user input for keywords
-  keywords = analyze_input(important_info + " " + extra_info)
- 
+def pos_neg(response):
+    prompt = f"""Classify the sentiment of the following sentence. Reply with ONLY '1' if the sentence is positive and ONLY '0' if the sentence is negative.\nSentence = {response}"""
+    result = generate_content(prompt)
+    return result == '1'
 
-  # Perform analysis on the provided information
-  analysis_result = perform_analysis(agreement_type, important_info)
- 
+def perform_analysis(atype, impt):
+    prompt = f"""You are a legal assistant specializing in determining if the input parameters by the user, defined in "{impt}", are enough parameters to format an agreement of type "{atype}".\nPlease evaluate if the provided information seems to cover all the generally important aspects for a "{atype}" agreement.\nMake sure to evaluate the quality of the input too, if the input seems vague, do consider it as a invalid/bad input.\nYour evaluation must be extremely strict and precise. Any vagueness/lack of information must be considered a severe defect.\nRespond with ONLY these messages, no others:\n"Yes. All essential information seems to be present." if the input appears comprehensive.\n"No, The following essential information seems to be missing or unclear: [list of missing/unclear aspects]" if key details appear to be absent.\n"No, The provided information is too vague or insufficient." if the input is very brief or lacks substantial details."""
+    response = generate_content(prompt)
+    return response, pos_neg(response)
 
-  # Mock response for demonstration
-  response = {
-  "response": f"Generated {agreement_type} agreement with details: {important_info}, {extra_info}. Analysis result: {analysis_result}. Keywords identified: {keywords}"
-  }
- 
+def obtain_information_holes():
+    total_info = important_info + ' ' + extra_info
+    prompt = f"""The total information given by the user as an input to generate the agreement of type {final_type} are given in "{total_info}".\nIdentify any missing or unclear information needed to generate a {final_type} agreement based on the provided user input: "{total_info}". As a comprehensive legal assistant, pinpoint specific details that require clarification or are absent from the input.\nGenerate your final prompt in a way such that if it is passed into a Google search, it gives back the required information."""
+    return generate_content(prompt)
 
-  return jsonify(response)
-  except Exception as e:
-  logging.error(f"Error generating agreement: {e}")
-  return jsonify({"error": str(e)}), 500
- 
+def get_data(holes):
+    prompt = f"""As an LLM, you have identified a few information deficiencies, outlined in "{holes}", required to generate a LAW agreement of type {final_type}.\nYou are supposed to retrieve the relevant information using Google search. Make sure to keep it concise and accurate."""
+    return generate_content(prompt)
 
- if __name__ == '__main__':
-  app.run(host='0.0.0.0', port=5000)
+def generate_agreement():
+    relevant_clauses = query_similar_clauses(extra_info, final_type)
+    sample_agreement_paths = extract_samples(final_type)
+    prompt = f"""You are a helpful AI assistant for law agreement generation. The names, dates, locations, and information are stored in "{important_info}".\nThe agreement type is "{final_type}".\n{relevant_clauses} contains 40 most common used clauses in the current agreements, with relevance sorted from highest to lowest, depending on this current use case. Make sure to read through them, understand them, and use the most relevant documents according to the user's wish as outlined in "{extra_info}".\nMake sure your clauses are end-to-end, non-manipulatable, unable to have loopholes, and concise and readable. While referring to government officers, refer to them as specifically as possible to avoid confusion.\nA few example agreement formats are outlined in "{sample_agreement_paths}". Structure them similarly and provide a concise output. The English must be clean, non-confusing, and clear enough to be understood by a common man, but complex enough to uphold legal intricacies and important points.\nSome important information that has been obtained through Google search is given in "{obtained_info}". Use it in your generation as requested by the user.\nFormat a full {final_type} agreement as provided in the samples and give the final output.\n\nRelevant Clauses: {', '.join(relevant_clauses)}"""
+    return generate_content(prompt)
+
+# Routes
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/send_message', methods=['POST'])
+def send_message():
+    global step, agreement_data, req, final_type, important_info, extra_info, obtained_info
+    user_input = request.json.get('message', '').strip()
+    if not user_input:
+        return jsonify({'response': '', 'step': step})
+
+    try:
+        if step == 1:
+            agreement_data['agreement_type'] = user_input
+            final_type = strip_type(user_input)
+            response = f"Excellent choice! For the {final_type} agreement, please provide critical details (e.g., parties involved, duration, financial terms)."
+            step = 2
+        elif step == 2:
+            agreement_data['important_info'] = user_input
+            important_info = user_input
+            response = f"Thank you! Any specific clauses or custom details for the {final_type} agreement?"
+            step = 3
+        else:
+            agreement_data['extra_info'] = user_input
+            extra_info = user_input
+            analysis_response, is_sufficient = perform_analysis(final_type, important_info)
+            if not is_sufficient:
+                step = 2
+                response = analysis_response + "\nPlease provide more details as prompted."
+            else:
+                info_holes = obtain_information_holes()
+                obtained_info = get_data(info_holes)
+                response = generate_agreement()
+                step = 1
+                agreement_data = {'agreement_type': '', 'important_info': '', 'extra_info': ''}
+                final_type = ''
+                important_info = ''
+                extra_info = ''
+                obtained_info = ''
+                req = False
+        return jsonify({'response': response, 'step': step})
+    except Exception as e:
+        return jsonify({'response': f"Error: {str(e)}", 'step': step})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
